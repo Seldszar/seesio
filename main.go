@@ -23,6 +23,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"golang.org/x/exp/maps"
 	"golang.org/x/oauth2/clientcredentials"
+	"golang.org/x/oauth2/twitch"
 )
 
 type H = bunrouter.H
@@ -148,7 +149,6 @@ func subscribe(ctx *cli.Context, client *http.Client, eventType, eventVersion st
 	}
 
 	req.Header.Set("Client-ID", ctx.String("twitch-client-id"))
-	req.Header.Set("Client-Secret", ctx.String("twitch-client-secret"))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
@@ -267,7 +267,8 @@ func main() {
 				ClientID:     ctx.String("twitch-client-id"),
 				ClientSecret: ctx.String("twitch-client-secret"),
 
-				TokenURL: "https://id.twitch.tv/oauth2/token",
+				AuthStyle: twitch.Endpoint.AuthStyle,
+				TokenURL:  twitch.Endpoint.TokenURL,
 			}
 
 			client := conf.Client(context.Background())
@@ -384,7 +385,7 @@ func main() {
 			})
 
 			if err := subscribeEvents(ctx, client); err != nil {
-				slog.Error("An error occured while subscribing to events, please authorize the application first: https://id.twitch.tv/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s/authorize/callback&scope=bits:read+channel:read:subscriptions&force_verify=true", ctx.String("twitch-client-id"), ctx.String("api-base-url"))
+				slog.Error(fmt.Sprintf("An error occured while subscribing to events, please authorize the application first: https://id.twitch.tv/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s/authorize/callback&scope=bits:read+channel:read:subscriptions&force_verify=true", ctx.String("twitch-client-id"), ctx.String("api-base-url")))
 			}
 
 			return http.ListenAndServe(":3000", router)
