@@ -175,11 +175,11 @@ func subscribeEvents(ctx *cli.Context, client *http.Client) error {
 		return err
 	}
 
-	if _, err := subscribe(ctx, client, "channel.subscribe.gift", "1", H{"broadcaster_user_id": userId}); err != nil {
+	if _, err := subscribe(ctx, client, "channel.subscribe.message ", "1", H{"broadcaster_user_id": userId}); err != nil {
 		return err
 	}
 
-	if _, err := subscribe(ctx, client, "channel.subscribe.message ", "1", H{"broadcaster_user_id": userId}); err != nil {
+	if _, err := subscribe(ctx, client, "channel.subscription.gift", "1", H{"broadcaster_user_id": userId}); err != nil {
 		return err
 	}
 
@@ -301,16 +301,16 @@ func main() {
 					return err
 				}
 
+				messageId := req.Header.Get("Twitch-Eventsub-Message-Id")
+
+				if _, ok := knownMessageIds[messageId]; ok {
+					return reply(w, http.StatusNoContent, "")
+				}
+
+				knownMessageIds[messageId] = struct{}{}
+
 				if verifyMessage(ctx, req.Header, body) {
 					res := gjson.ParseBytes(body)
-
-					messageId := res.Get("Twitch-Eventsub-Message-Id").String()
-
-					if _, ok := knownMessageIds[messageId]; ok {
-						return reply(w, http.StatusNoContent, "")
-					}
-
-					knownMessageIds[messageId] = struct{}{}
 
 					switch req.Header.Get("Twitch-Eventsub-Message-Type") {
 					case "notification":
@@ -353,7 +353,7 @@ func main() {
 
 							session.AddSubscription(data)
 
-						case "channel.subscribe.gift":
+						case "channel.subscription.gift":
 							data := &SubscriptionGift{
 								UserLogin: res.Get("event.user_login").String(),
 								UserName:  res.Get("event.user_name").String(),
