@@ -2,14 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -18,10 +16,10 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/rs/zerolog/pkgerrors"
+	"github.com/tidwall/buntdb"
 	"github.com/tidwall/gjson"
 	"github.com/uptrace/bunrouter"
 	"github.com/urfave/cli/v2"
-	"golang.org/x/exp/maps"
 	"golang.org/x/oauth2/clientcredentials"
 	"golang.org/x/oauth2/twitch"
 )
@@ -29,18 +27,21 @@ import (
 type H = bunrouter.H
 
 type Cheer struct {
+	UserID    string `json:"user_id"`
 	UserLogin string `json:"user_login"`
 	UserName  string `json:"user_name"`
 	Bits      int64  `json:"amount"`
 }
 
 type Raid struct {
+	UserID    string `json:"user_id"`
 	UserLogin string `json:"user_login"`
 	UserName  string `json:"user_name"`
 	Viewers   int64  `json:"count"`
 }
 
 type Subscription struct {
+	UserID    string `json:"user_id"`
 	UserLogin string `json:"user_login"`
 	UserName  string `json:"user_name"`
 	Tier      string `json:"tier"`
@@ -48,76 +49,116 @@ type Subscription struct {
 }
 
 type SubscriptionGift struct {
+	UserID    string `json:"user_id"`
 	UserLogin string `json:"user_login"`
 	UserName  string `json:"user_name"`
 	Total     int64  `json:"total"`
 }
 
-type Session struct {
-	Cheers            map[string]*Cheer
-	Raids             map[string]*Raid
-	Subscriptions     map[string]*Subscription
-	SubscriptionGifts map[string]*SubscriptionGift
+func decodeValue[T any](data string) (v T, err error) {
+	return v, json.Unmarshal([]byte(data), &v)
 }
 
-func (s *Session) AddCheer(data *Cheer) {
-	if v, ok := s.Cheers[data.UserName]; ok {
-		data.Bits += v.Bits
+func encodeValue[T any](v T) (string, error) {
+	data, err := json.Marshal(v)
+
+	if err != nil {
+		return "", err
 	}
 
-	s.Cheers[data.UserName] = data
+	return string(data), nil
 }
 
-func (s *Session) AddRaid(data *Raid) {
-	if v, ok := s.Raids[data.UserName]; ok && data.Viewers > v.Viewers {
-		data.Viewers = v.Viewers
+func ascend[T any](tx *buntdb.Tx, index string) ([]T, error) {
+	items := make([]T, 0)
+
+	err := tx.Ascend(index, func(key, value string) bool {
+		if item, err := decodeValue[T](value); err == nil {
+			items = append(items, item)
+		}
+
+		return true
+	})
+
+	if err != nil {
+		return nil, err
 	}
 
-	s.Raids[data.UserName] = data
+	return items, nil
 }
 
-func (s *Session) AddSubscription(data *Subscription) {
-	if v, ok := s.Subscriptions[data.UserName]; ok && data.Months > v.Months {
-		data.Months = v.Months
+func get[T any](tx *buntdb.Tx, key string) (*T, error) {
+	value, err := tx.Get(key)
+
+	if err != nil {
+		return nil, err
 	}
 
-	s.Subscriptions[data.UserName] = data
+	return decodeValue[*T](value)
 }
 
-func (s *Session) AddSubscriptionGift(data *SubscriptionGift) {
-	if v, ok := s.SubscriptionGifts[data.UserName]; ok {
-		data.Total += v.Total
+func set[T any](tx *buntdb.Tx, key string, item T) error {
+	data, err := encodeValue(&item)
+
+	if err != nil {
+		return err
 	}
 
-	s.SubscriptionGifts[data.UserName] = data
-}
-
-func (s Session) MarshalJSON() ([]byte, error) {
-	res := H{
-		"cheers":             maps.Values(s.Cheers),
-		"raids":              maps.Values(s.Raids),
-		"subscription_gifts": maps.Values(s.SubscriptionGifts),
-		"subscriptions":      maps.Values(s.Subscriptions),
+	if _, _, err := tx.Set(key, data, nil); err != nil {
+		return err
 	}
 
-	return json.Marshal(res)
+	return nil
 }
 
-func (s *Session) Reset() {
-	clear(s.Cheers)
-	clear(s.Raids)
-	clear(s.Subscriptions)
-	clear(s.SubscriptionGifts)
+func addCheer(tx *buntdb.Tx, data *Cheer) error {
+	key := fmt.Sprintf("cheer:%s", data.UserID)
+
+	if item, err := get[Cheer](tx, key); err == nil {
+		data.Bits += item.Bits
+	}
+
+	return set(tx, key, data)
 }
 
-func reply(w http.ResponseWriter, statusCode int, value string) error {
+func addRaid(tx *buntdb.Tx, data *Raid) error {
+	key := fmt.Sprintf("raid:%s", data.UserID)
+
+	if item, err := get[Raid](tx, key); err == nil && data.Viewers > item.Viewers {
+		data.Viewers = item.Viewers
+	}
+
+	return set(tx, key, data)
+}
+
+func addSubscription(tx *buntdb.Tx, data *Subscription) error {
+	key := fmt.Sprintf("subscription:%s", data.UserID)
+
+	if item, err := get[Subscription](tx, key); err == nil && data.Months > item.Months {
+		data.Months = item.Months
+	}
+
+	return set(tx, key, data)
+}
+
+func addSubscriptionGift(tx *buntdb.Tx, data *SubscriptionGift) error {
+	key := fmt.Sprintf("subscription_gift:%s", data.UserID)
+
+	if item, err := get[SubscriptionGift](tx, key); err == nil {
+		data.Total += item.Total
+	}
+
+	return set(tx, key, data)
+}
+
+func reply(w http.ResponseWriter, statusCode int, data string) error {
 	w.WriteHeader(statusCode)
 
-	if value == "" {
+	if data == "" {
 		return nil
 	}
 
-	if _, err := io.WriteString(w, value); err != nil {
+	if _, err := io.WriteString(w, data); err != nil {
 		return err
 	}
 
@@ -226,6 +267,12 @@ func main() {
 	app := &cli.App{
 		Flags: []cli.Flag{
 			&cli.StringFlag{
+				Name:    "api-server-address",
+				EnvVars: []string{"API_SERVER_ADDRESS"},
+				Usage:   "Address used by the server to listen",
+				Value:   ":3000",
+			},
+			&cli.StringFlag{
 				Name:     "api-base-url",
 				EnvVars:  []string{"API_BASE_URL"},
 				Usage:    "Base URL used for receiving events",
@@ -261,8 +308,27 @@ func main() {
 				Usage:    "User ID used for listening to events",
 				Required: true,
 			},
+			&cli.PathFlag{
+				Name:    "database-path",
+				EnvVars: []string{"DATABASE_PATH"},
+				Usage:   "Path to the database",
+				Value:   ":memory:",
+			},
 		},
 		Action: func(ctx *cli.Context) error {
+			db, err := buntdb.Open(ctx.Path("database-path"))
+
+			if err != nil {
+				return err
+			}
+
+			defer db.Close()
+
+			db.CreateIndex("cheers", "cheer:*")
+			db.CreateIndex("raids", "raid:*")
+			db.CreateIndex("subscription_gifts", "subscription_gift:*")
+			db.CreateIndex("subscriptions", "subscription:*")
+
 			conf := &clientcredentials.Config{
 				ClientID:     ctx.String("twitch-client-id"),
 				ClientSecret: ctx.String("twitch-client-secret"),
@@ -271,24 +337,42 @@ func main() {
 				TokenURL:  twitch.Endpoint.TokenURL,
 			}
 
-			client := conf.Client(context.Background())
+			client := conf.Client(ctx.Context)
 			router := bunrouter.New()
-
-			var offlineTime time.Time
-
-			session := Session{
-				Cheers:            make(map[string]*Cheer),
-				Raids:             make(map[string]*Raid),
-				Subscriptions:     make(map[string]*Subscription),
-				SubscriptionGifts: make(map[string]*SubscriptionGift),
-			}
 
 			knownMessageIds := make(map[string]struct{})
 
 			router.GET("/", func(w http.ResponseWriter, req bunrouter.Request) error {
-				return bunrouter.JSON(w, &H{
-					"data": session,
+				var cheers []Cheer
+				var raids []Raid
+				var subscriptionGifts []SubscriptionGift
+				var subscriptions []Subscription
+
+				err := db.View(func(tx *buntdb.Tx) error {
+					cheers, _ = ascend[Cheer](tx, "cheers")
+					raids, _ = ascend[Raid](tx, "raids")
+					subscriptionGifts, _ = ascend[SubscriptionGift](tx, "subscription_gifts")
+					subscriptions, _ = ascend[Subscription](tx, "subscriptions")
+
+					return nil
 				})
+
+				if err != nil {
+					return err
+				}
+
+				data, err := encodeValue(H{
+					"cheers":             cheers,
+					"raids":              raids,
+					"subscription_gifts": subscriptionGifts,
+					"subscriptions":      subscriptions,
+				})
+
+				if err != nil {
+					return err
+				}
+
+				return reply(w, http.StatusOK, data)
 			})
 
 			router.GET("/authorize/callback", func(w http.ResponseWriter, req bunrouter.Request) error {
@@ -315,26 +399,40 @@ func main() {
 
 					switch req.Header.Get("Twitch-Eventsub-Message-Type") {
 					case "notification":
-						slog.Debug("Notification received", res.String())
+						log.Debug().Str("body", res.String()).Msg("Notification received")
 
 						switch res.Get("subscription.type").String() {
 						case "channel.cheer":
 							data := &Cheer{
+								UserID:    res.Get("event.user_id").String(),
 								UserLogin: res.Get("event.user_login").String(),
 								UserName:  res.Get("event.user_name").String(),
 								Bits:      res.Get("event.bits").Int(),
 							}
 
-							session.AddCheer(data)
+							err := db.Update(func(tx *buntdb.Tx) error {
+								return addCheer(tx, data)
+							})
+
+							if err != nil {
+								return err
+							}
 
 						case "channel.raid":
 							data := &Raid{
+								UserID:    res.Get("event.user_id").String(),
 								UserLogin: res.Get("event.from_broadcaster_user_login").String(),
 								UserName:  res.Get("event.from_broadcaster_user_name").String(),
 								Viewers:   res.Get("event.viewers").Int(),
 							}
 
-							session.AddRaid(data)
+							err := db.Update(func(tx *buntdb.Tx) error {
+								return addRaid(tx, data)
+							})
+
+							if err != nil {
+								return err
+							}
 
 						case "channel.subscribe", "channel.subscribe.message":
 							if res.Get("event.is_gift").Bool() {
@@ -342,36 +440,61 @@ func main() {
 							}
 
 							data := &Subscription{
+								UserID:    res.Get("event.user_id").String(),
 								UserLogin: res.Get("event.user_login").String(),
 								UserName:  res.Get("event.user_name").String(),
 								Tier:      res.Get("event.tier").String(),
 								Months:    1,
 							}
 
-							if months := res.Get("event.cumulative_months").Int(); months > 0 {
+							if months := res.Get("event.cumulative_months").Int(); months > 1 {
 								data.Months = months
 							}
 
-							session.AddSubscription(data)
+							err := db.Update(func(tx *buntdb.Tx) error {
+								return addSubscription(tx, data)
+							})
+
+							if err != nil {
+								return err
+							}
 
 						case "channel.subscription.gift":
 							data := &SubscriptionGift{
+								UserID:    res.Get("event.user_id").String(),
 								UserLogin: res.Get("event.user_login").String(),
 								UserName:  res.Get("event.user_name").String(),
 								Total:     res.Get("event.total").Int(),
 							}
 
-							session.AddSubscriptionGift(data)
+							err := db.Update(func(tx *buntdb.Tx) error {
+								return addSubscriptionGift(tx, data)
+							})
 
-						case "stream.offline":
-							offlineTime = time.Now()
-
-						case "stream.online":
-							if offlineTime.Add(time.Duration(ctx.Int("session-reset-delay")) * time.Minute).After(time.Now()) {
-								break
+							if err != nil {
+								return err
 							}
 
-							session.Reset()
+						case "stream.offline":
+							db.Update(func(tx *buntdb.Tx) error {
+								_, _, err := tx.Set("offlineTime", time.Now().String(), &buntdb.SetOptions{
+									TTL:     time.Duration(ctx.Int("session-reset-delay")) * time.Minute,
+									Expires: true,
+								})
+
+								return err
+							})
+
+						case "stream.online":
+							db.Update(func(tx *buntdb.Tx) error {
+								_, err := tx.Get("offlineTime")
+
+								if err == buntdb.ErrNotFound {
+									return tx.DeleteAll()
+								}
+
+								return err
+							})
 						}
 
 					case "webhook_callback_verification":
@@ -385,10 +508,10 @@ func main() {
 			})
 
 			if err := subscribeEvents(ctx, client); err != nil {
-				slog.Error(fmt.Sprintf("An error occured while subscribing to events, please authorize the application first: https://id.twitch.tv/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s/authorize/callback&scope=bits:read+channel:read:subscriptions&force_verify=true", ctx.String("twitch-client-id"), ctx.String("api-base-url")))
+				return fmt.Errorf("an error occured while subscribing to events, please authorize the application first: https://id.twitch.tv/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s/authorize/callback&scope=bits:read+channel:read:subscriptions&force_verify=true", ctx.String("twitch-client-id"), ctx.String("api-base-url"))
 			}
 
-			return http.ListenAndServe(":3000", router)
+			return http.ListenAndServe(ctx.String("api-server-address"), router)
 		},
 	}
 
