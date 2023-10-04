@@ -52,6 +52,7 @@ type SubscriptionGift struct {
 	UserID    string `json:"user_id"`
 	UserLogin string `json:"user_login"`
 	UserName  string `json:"user_name"`
+	Tier      string `json:"tier"`
 	Total     int64  `json:"total"`
 }
 
@@ -142,7 +143,7 @@ func addSubscription(tx *buntdb.Tx, data *Subscription) error {
 }
 
 func addSubscriptionGift(tx *buntdb.Tx, data *SubscriptionGift) error {
-	key := fmt.Sprintf("subscription_gift:%s", data.UserID)
+	key := fmt.Sprintf("subscription_gift:%s:%s", data.UserID, data.Tier)
 
 	if item, err := get[SubscriptionGift](tx, key); err == nil {
 		data.Total += item.Total
@@ -464,6 +465,7 @@ func main() {
 								UserID:    res.Get("event.user_id").String(),
 								UserLogin: res.Get("event.user_login").String(),
 								UserName:  res.Get("event.user_name").String(),
+								Tier:      res.Get("event.tier").String(),
 								Total:     res.Get("event.total").Int(),
 							}
 
