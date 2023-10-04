@@ -30,14 +30,14 @@ type Cheer struct {
 	UserID    string `json:"user_id"`
 	UserLogin string `json:"user_login"`
 	UserName  string `json:"user_name"`
-	Bits      int64  `json:"amount"`
+	Bits      int64  `json:"bits"`
 }
 
 type Raid struct {
 	UserID    string `json:"user_id"`
 	UserLogin string `json:"user_login"`
 	UserName  string `json:"user_name"`
-	Viewers   int64  `json:"count"`
+	Viewers   int64  `json:"viewers"`
 }
 
 type Subscription struct {
