@@ -33,6 +33,13 @@ type Cheer struct {
 	Bits      int64  `json:"bits"`
 }
 
+type Follow struct {
+	UserID     string    `json:"user_id"`
+	UserLogin  string    `json:"user_login"`
+	UserName   string    `json:"user_name"`
+	FollowedAt time.Time `json:"followed_at"`
+}
+
 type Raid struct {
 	UserID    string `json:"user_id"`
 	UserLogin string `json:"user_login"`
@@ -122,6 +129,16 @@ func addCheer(tx *buntdb.Tx, data *Cheer) error {
 	return set(tx, key, data)
 }
 
+func addFollow(tx *buntdb.Tx, data *Follow) error {
+	key := fmt.Sprintf("follow:%s", data.UserID)
+
+	if item, err := get[Follow](tx, key); err == nil {
+		data.FollowedAt = item.FollowedAt
+	}
+
+	return set(tx, key, data)
+}
+
 func addRaid(tx *buntdb.Tx, data *Raid) error {
 	key := fmt.Sprintf("raid:%s", data.UserID)
 
@@ -206,6 +223,10 @@ func subscribeEvents(ctx *cli.Context, client *http.Client) error {
 	userId := ctx.String("twitch-client-id")
 
 	if _, err := subscribe(ctx, client, "channel.cheer", "1", H{"broadcaster_user_id": userId}); err != nil {
+		return err
+	}
+
+	if _, err := subscribe(ctx, client, "channel.follow", "2", H{"broadcaster_user_id": userId, "moderator_user_id": userId}); err != nil {
 		return err
 	}
 
@@ -326,6 +347,7 @@ func main() {
 			defer db.Close()
 
 			db.CreateIndex("cheers", "cheer:*")
+			db.CreateIndex("follows", "follow:*")
 			db.CreateIndex("raids", "raid:*")
 			db.CreateIndex("subscription_gifts", "subscription_gift:*")
 			db.CreateIndex("subscriptions", "subscription:*")
@@ -345,12 +367,14 @@ func main() {
 
 			router.GET("/", func(w http.ResponseWriter, req bunrouter.Request) error {
 				var cheers []Cheer
+				var follows []Follow
 				var raids []Raid
 				var subscriptionGifts []SubscriptionGift
 				var subscriptions []Subscription
 
 				err := db.View(func(tx *buntdb.Tx) error {
 					cheers, _ = ascend[Cheer](tx, "cheers")
+					follows, _ = ascend[Follow](tx, "follows")
 					raids, _ = ascend[Raid](tx, "raids")
 					subscriptionGifts, _ = ascend[SubscriptionGift](tx, "subscription_gifts")
 					subscriptions, _ = ascend[Subscription](tx, "subscriptions")
@@ -364,6 +388,7 @@ func main() {
 
 				data, err := encodeValue(H{
 					"cheers":             cheers,
+					"follows":            follows,
 					"raids":              raids,
 					"subscription_gifts": subscriptionGifts,
 					"subscriptions":      subscriptions,
@@ -413,6 +438,22 @@ func main() {
 
 							err := db.Update(func(tx *buntdb.Tx) error {
 								return addCheer(tx, data)
+							})
+
+							if err != nil {
+								return err
+							}
+
+						case "channel.follow":
+							data := &Follow{
+								UserID:     res.Get("event.user_id").String(),
+								UserLogin:  res.Get("event.user_login").String(),
+								UserName:   res.Get("event.user_name").String(),
+								FollowedAt: res.Get("event.followed_at").Time(),
+							}
+
+							err := db.Update(func(tx *buntdb.Tx) error {
+								return addFollow(tx, data)
 							})
 
 							if err != nil {
@@ -510,7 +551,7 @@ func main() {
 			})
 
 			if err := subscribeEvents(ctx, client); err != nil {
-				return fmt.Errorf("an error occured while subscribing to events, please authorize the application first: https://id.twitch.tv/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s/authorize/callback&scope=bits:read+channel:read:subscriptions&force_verify=true", ctx.String("twitch-client-id"), ctx.String("api-base-url"))
+				return fmt.Errorf("an error occured while subscribing to events, please authorize the application first: https://id.twitch.tv/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s/authorize/callback&scope=bits:read+channel:read:subscriptions+moderator:read:followers&force_verify=true", ctx.String("twitch-client-id"), ctx.String("api-base-url"))
 			}
 
 			return http.ListenAndServe(ctx.String("api-server-address"), router)
